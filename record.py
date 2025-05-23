@@ -1,3 +1,4 @@
+import signal
 import tkinter as tk
 from tkinter import ttk,messagebox
 import subprocess
@@ -15,9 +16,49 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+
+class RecordView:
+    def __init__(self, view_name, view_url, output_dir, output_name, cache_dir):
+        self.view_name = view_name
+        self.view_url = view_url
+        self.output_dir = output_dir
+        self.cache_dir = cache_dir
+        self.output_name = output_name
+    
+    def __repr__(self):
+        return f"RecordView(view_name={self.view_name}, view_url={self.view_url}, output_dir={self.output_dir}, output_name={self.output_name})"
+    
+    def start(self, use_unique_name=True):
+        if use_unique_name:
+            output_full_name = os.path.join(self.output_dir, self.output_name)
+            counter = 1
+            while os.path.exists(output_full_name):
+                name, ext = os.path.splitext(self.output_name)
+                self.output_name = f"{name}_{counter}{ext}"
+                output_full_name = os.path.join(self.output_dir, self.output_name)
+                counter += 1
+        # 启动下载进程
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
+        # 使用 subprocess 启动下载进程
+
+        cmd = [m3u8dl_path, self.view_url, "--save-dir", self.output_dir, "--save-name", self.output_name, "--tmp-dir", self.cache_dir, "--live-real-time-merge", "--live-pipe-mux", "--ffmpeg-binary-path", ffmpeg_path]
+        process = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+        return process
+    
+    def clear_downloaded_file(self):
+        output_file = os.path.join(self.output_dir, self.output_name)
+        if os.path.exists(output_file):
+            os.remove(output_file)
+
+
 hint_text = "文件前缀"
 live_game_info = 'https://rm-static.djicdn.com/live_json/live_game_info.json'
 current_and_next_matches = 'https://rm-static.djicdn.com/live_json/current_and_next_matches.json'
+
+timer = None
 
 if getattr(sys,'frozen',False):
     script_dir = os.path.dirname(os.path.abspath(sys.executable))
@@ -26,11 +67,19 @@ else:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     base_path = script_dir
 
-def find_ffmpeg():
-    ffmpeg_path = shutil.which('ffmpeg')
-    if ffmpeg_path:
-        return ffmpeg_path
-    exe_name = 'ffmpeg.exe' if os.name == 'nt' else 'ffmpeg'
+def find_binary_executable(exe_name: str):
+    """
+    查找可执行文件的路径。
+    :param exec_name: 可执行文件的名称，应当为不带扩展名的文件名。
+    :return: 可执行文件的路径，如果未找到则返回 None。
+    """
+    if os.name == 'nt' and exe_name.endswith('.exe'):
+        exe_name = exe_name[:-4]
+
+    exe_path = shutil.which(exe_name)
+    if exe_path:
+        return exe_path
+    exe_name = exe_name + ".exe" if os.name == 'nt' else exe_name
     local_paths = [
         os.path.join(base_path, exe_name),
         os.path.join(base_path, 'bin', exe_name),
@@ -38,11 +87,12 @@ def find_ffmpeg():
     for path in local_paths:
         if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
-    messagebox.showerror("错误", "未找到 ffmpeg，请确保其已安装并添加到系统环境变量")
+    messagebox.showerror("错误", f"未找到 {exe_name}，请确保其已安装并添加到系统环境变量，或者位于此软件的 bin 文件夹中")
     sys.exit(1)
 
 # 在初始化时查找 ffmpeg 路径
-ffmpeg_path = find_ffmpeg()
+ffmpeg_path = find_binary_executable("ffmpeg")
+m3u8dl_path = find_binary_executable("N_m3u8DL-RE.exe")
 json_path = os.path.join(script_dir,'live_data.json')
 
 def download_json(url):
@@ -53,6 +103,11 @@ def download_json(url):
 def get_current_matche():
     try:
         data = download_json(current_and_next_matches)
+        order_number = None
+        round_number = None
+        blue_team = None
+        red_team = None
+
         for item in data:
             current_match = item.get("currentMatch")
             if current_match is not None:
@@ -60,6 +115,11 @@ def get_current_matche():
                 round_number = current_match.get("round")
                 blue_team = current_match["blueSide"]["player"]["team"]
                 red_team = current_match["redSide"]["player"]["team"]
+        
+        if order_number is None or round_number is None or blue_team is None or red_team is None:
+            messagebox.showwarning('提示','当前可能没有进行中的比赛')
+            return
+
         match_info = f"第{int(order_number):02}场.{red_team['collegeName']}.{red_team['name']}.vs.{blue_team['collegeName']}.{blue_team['name']}.第{round_number}局"
         match_info = match_info.replace('（', '(').replace('）', ')')
         text_entry.delete(0, tk.END)
@@ -92,12 +152,43 @@ def update_json():
             break
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(new_data, f, ensure_ascii=False, indent=4)
+    messagebox.showinfo('提示','JSON数据更新成功')
+
+
+def update_record_status():
+    if len(processes) == 0:
+        for label in status_labels:
+            label.grid_remove()
+        return
+    for i, task in enumerate(tasks):
+        process = processes[i]
+        if process.poll() is None:
+            label = status_labels[i]
+            label.grid()
+            label.config(text=f"{task.view_name} 正在录制", style="Green.TLabel")
+        elif process.poll() == 0:
+            label = status_labels[i]
+            label.grid()
+            label.config(text=f"{task.view_name} 录制完成", style="Yellow.TLabel")
+        else:
+            label = status_labels[i]
+            label.grid()
+            label.config(text=f"{task.view_name} 录制失败", style="Red.TLabel")
+            root.after(3000, restart_task, task, i)
+
+    root.after(1000, update_record_status)
+
+
+def restart_task(task, id):
+    global processes
+    processes[id] = task.start()
 
 if not os.path.exists(json_path):
     update_json()
 
 # 下载任务列表
 processes = []
+tasks = []
 downloading = False
 
 def start_stop_downloads():
@@ -141,18 +232,20 @@ def file_list():
                     files.append((role, src))
     return files
 
-def get_unique_folder(base_dir,out_dir,folder_name):
+def get_unique_folder(base_dir,out_dir,cache_dir,folder_name):
     output_folder = os.path.join(base_dir, out_dir, folder_name)
+    cache_folder = os.path.join(base_dir, cache_dir, folder_name)
     counter = 1
     unique_folder = output_folder
     while os.path.exists(unique_folder):
         unique_folder = f"{output_folder}_{counter}"
         counter += 1
     os.makedirs(unique_folder)
-    return unique_folder
+    os.makedirs(cache_folder, exist_ok=True)
+    return unique_folder, cache_folder
 
 def start_downloads():
-    global processes
+    global processes, tasks
     files = file_list()
     dirmane = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -163,28 +256,32 @@ def start_downloads():
     if game_info != '':
         dirmane = game_info.split('.')[0]
         game_info = game_info+'_'
-    output_folder = get_unique_folder(script_dir,'output', dirmane)
+    output_folder, cache_folder = get_unique_folder(script_dir,'output', "cache", dirmane)
     os.makedirs(output_folder, exist_ok=True)
+    os.makedirs(cache_folder, exist_ok=True)
     # 创建并行下载的 subprocess 任务
     processes = []
+    tasks.clear()
     for file in files:
-        output_file = game_info+file[0]+'.mp4'
-        cmd = [ffmpeg_path,'-i', file[1], '-c','copy',os.path.join(output_folder, output_file)]
-        process = subprocess.Popen(cmd,stdin=subprocess.PIPE,creationflags=subprocess.CREATE_NO_WINDOW)
+        output_file = game_info+file[0]
+        task = RecordView(file[0], file[1], output_folder, output_file, cache_folder)
+        tasks.append(task)
+        process = task.start()
         processes.append(process)
 
+    root.after(1000, update_record_status)
+
 def stop_downloads():
-    global processes
+    global processes, tasks
     for process in processes:
-        # 如果还在运行，发送 'q' 键命令到 ffmpeg 进程
         if process.poll() is None:
-            process.stdin.write(b'q')
-            process.stdin.flush()
+            # process.send_signal(signal.CTRL_C_EVENT)
+            process.terminate()
     # 等待所有子进程完成
     for process in processes:
         process.wait()
-    print("所有下载任务已停止。")
-    processes = []
+    processes.clear()
+    tasks.clear()
 
 def on_closing():
     if downloading:
@@ -213,7 +310,6 @@ root = tk.Tk()
 root.withdraw()
 root.title("RMrecord")
 root.iconbitmap(os.path.join(base_path,'icon.ico'))
-root.resizable(width=False, height=False)
 root.grid_rowconfigure(0, weight=1)
 root.grid_columnconfigure(0, weight=1)
 # 创建菜单栏
@@ -265,6 +361,20 @@ text_entry.insert(0, hint_text)
 text_entry.bind("<FocusIn>", on_entry_focus_in)
 text_entry.bind("<FocusOut>", on_entry_focus_out)
 text_entry.grid(row=4, column=0, columnspan=2, padx=10, pady=10, sticky='ew')
+
+status_labels = []
+green_text_label_style = ttk.Style()
+green_text_label_style.configure("Green.TLabel", foreground="green")
+red_text_label_style = ttk.Style()
+red_text_label_style.configure("Red.TLabel", foreground="red")
+yellow_text_label_style = ttk.Style()
+yellow_text_label_style.configure("Yellow.TLabel", foreground="yellow")
+for i in range(15):
+    label = ttk.Label(frame, text="", anchor='w')
+    label.grid(row=5 + int(i / 2), column=i % 2, padx=10, pady=0, sticky='ew')
+    # 先隐藏
+    label.grid_remove()
+    status_labels.append(label)
 
 # 设置窗口关闭时的处理函数
 root.protocol("WM_DELETE_WINDOW", on_closing)
