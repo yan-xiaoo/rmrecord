@@ -1,0 +1,55 @@
+name: Build Windows App
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Windows directory package
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller
+
+      - name: Build directory package
+        shell: pwsh
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --windowed `
+            --onedir `
+            --name record `
+            --icon icon.ico `
+            --add-data "icon.ico;." `
+            --add-data "bin;bin" `
+            record.py
+
+          if (-not (Test-Path "dist\record\record.exe")) {
+            throw "Expected dist\record\record.exe was not created."
+          }
+
+      - name: Upload packaged app
+        uses: actions/upload-artifact@v7
+        with:
+          name: rmrecord-windows-py312
+          path: dist/record/
+          if-no-files-found: error
+          retention-days: 30
